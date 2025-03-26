@@ -9,9 +9,14 @@ module.exports = {
         client.user.setActivity('economy', { type: 'PLAYING' });
         
         try {
-            const slashCommands = await loadCommands(client);
-            await client.application.commands.set(slashCommands);
-            console.log('Slash commands registered');
+            const slashCommands = Array.from(client.commands.values())
+                .filter(cmd => cmd.data)
+                .map(cmd => cmd.data.toJSON());
+            
+            if (slashCommands.length > 0) {
+                await client.application.commands.set(slashCommands);
+                console.log('Slash commands registered');
+            }
         } catch (error) {
             console.error('Failed to register slash commands:', error);
         }
