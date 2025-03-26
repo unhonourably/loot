@@ -66,7 +66,8 @@ async function createTables() {
             CREATE TABLE IF NOT EXISTS user_balances (
                 guild_id VARCHAR(255),
                 user_id VARCHAR(255),
-                balance BIGINT NOT NULL DEFAULT 0,
+                wallet_balance BIGINT NOT NULL DEFAULT 0,
+                bank_balance BIGINT NOT NULL DEFAULT 0,
                 last_daily TIMESTAMP NULL,
                 last_work TIMESTAMP NULL,
                 last_rob TIMESTAMP NULL,
@@ -141,10 +142,82 @@ async function updateGuildConfig(guildId, updates) {
     return true;
 }
 
+async function getUserBalance(guildId, userId) {
+    const [rows] = await pool.query(
+        'SELECT * FROM user_balances WHERE guild_id = ? AND user_id = ?',
+        [guildId, userId]
+    );
+
+    if (rows.length === 0) {
+        const config = await getGuildConfig(guildId);
+        await pool.query(
+            'INSERT INTO user_balances (guild_id, user_id, wallet_balance, bank_balance) VALUES (?, ?, ?, 0)',
+            [guildId, userId, config.starting_balance]
+        );
+        return {
+            wallet: config.starting_balance,
+            bank: 0
+        };
+    }
+
+    return {
+        wallet: rows[0].wallet_balance,
+        bank: rows[0].bank_balance
+    };
+}
+
+async function transferMoney(guildId, userId, amount, toBank = true) {
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        const [rows] = await connection.query(
+            'SELECT * FROM user_balances WHERE guild_id = ? AND user_id = ? FOR UPDATE',
+            [guildId, userId]
+        );
+
+        if (rows.length === 0) {
+            throw new Error('User not found');
+        }
+
+        const currentBalance = toBank ? rows[0].wallet_balance : rows[0].bank_balance;
+        if (currentBalance < amount) {
+            throw new Error('Insufficient funds');
+        }
+
+        const config = await getGuildConfig(guildId);
+        if (toBank && rows[0].bank_balance + amount > config.max_balance) {
+            throw new Error('Bank balance would exceed maximum limit');
+        }
+
+        if (toBank) {
+            await connection.query(
+                'UPDATE user_balances SET wallet_balance = wallet_balance - ?, bank_balance = bank_balance + ? WHERE guild_id = ? AND user_id = ?',
+                [amount, amount, guildId, userId]
+            );
+        } else {
+            await connection.query(
+                'UPDATE user_balances SET wallet_balance = wallet_balance + ?, bank_balance = bank_balance - ? WHERE guild_id = ? AND user_id = ?',
+                [amount, amount, guildId, userId]
+            );
+        }
+
+        await connection.commit();
+        return true;
+    } catch (error) {
+        await connection.rollback();
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     connectDatabase,
     getGuildPrefix,
     setGuildPrefix,
     getGuildConfig,
-    updateGuildConfig
+    updateGuildConfig,
+    getUserBalance,
+    transferMoney
 };
