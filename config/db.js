@@ -104,8 +104,6 @@ async function setGuildPrefix(guildId, prefix) {
 }
 
 async function getGuildConfig(guildId) {
-    await setGuildPrefix(guildId, '!');
-    
     const [rows] = await pool.query('SELECT * FROM guild_configs WHERE guild_id = ?', [guildId]);
     if (rows.length === 0) {
         await pool.query(
@@ -118,8 +116,6 @@ async function getGuildConfig(guildId) {
 }
 
 async function updateGuildConfig(guildId, updates) {
-    await setGuildPrefix(guildId, '!');
-
     const validFields = [
         'currency_name', 'currency_emoji', 'command_cooldown', 'daily_cooldown',
         'work_cooldown', 'work_min_amount', 'work_max_amount', 'daily_amount',
@@ -599,6 +595,46 @@ async function updateUserDaily(guildId, userId) {
     );
 }
 
+async function cleanLeaderboard(guildId, guild) {
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        const [rows] = await connection.query(
+            'SELECT user_id FROM user_balances WHERE guild_id = ?',
+            [guildId]
+        );
+
+        let removed = 0;
+        for (const row of rows) {
+            try {
+                const member = guild.members.cache.get(row.user_id);
+                if (!member) {
+                    await connection.query(
+                        'DELETE FROM user_balances WHERE guild_id = ? AND user_id = ?',
+                        [guildId, row.user_id]
+                    );
+                    await connection.query(
+                        'DELETE FROM user_daily WHERE guild_id = ? AND user_id = ?',
+                        [guildId, row.user_id]
+                    );
+                    removed++;
+                }
+            } catch (error) {
+                console.error(`Error cleaning up user ${row.user_id}:`, error);
+            }
+        }
+
+        await connection.commit();
+        return { removed };
+    } catch (error) {
+        await connection.rollback();
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
 module.exports = {
     connectDatabase,
     getGuildPrefix,
@@ -616,5 +652,6 @@ module.exports = {
     addMoney,
     getUserPosition,
     getUserDaily,
-    updateUserDaily
+    updateUserDaily,
+    cleanLeaderboard
 };

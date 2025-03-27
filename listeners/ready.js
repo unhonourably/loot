@@ -17,8 +17,19 @@ module.exports = {
                 await client.application.commands.set(slashCommands);
                 console.log('Slash commands registered');
             }
+
+            console.log('Fetching members for all guilds...');
+            for (const guild of client.guilds.cache.values()) {
+                try {
+                    await guild.members.fetch();
+                    console.log(`Fetched members for ${guild.name}`);
+                } catch (error) {
+                    console.error(`Failed to fetch members for ${guild.name}:`, error);
+                }
+            }
+            console.log('Member fetching complete');
         } catch (error) {
-            console.error('Failed to register slash commands:', error);
+            console.error('Failed during startup:', error);
         }
     }
 }; 
