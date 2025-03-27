@@ -62,7 +62,7 @@ module.exports = {
                 .addStringOption(option =>
                     option
                         .setName('value')
-                        .setDescription('The new value (use s/m/h/d for time values)')
+                        .setDescription('The new value (use s/m/h/d for time values, use true/false for enabling/disabling things.)')
                         .setRequired(true))),
 
     async execute(messageOrInteraction, args) {

@@ -76,6 +76,16 @@ async function createTables() {
                 FOREIGN KEY (guild_id) REFERENCES guild_prefixes(guild_id) ON DELETE CASCADE
             )
         `);
+
+        await connection.query(`
+            CREATE TABLE IF NOT EXISTS user_daily (
+                guild_id VARCHAR(255),
+                user_id VARCHAR(255),
+                last_daily INT NOT NULL DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id),
+                FOREIGN KEY (guild_id) REFERENCES guild_prefixes(guild_id) ON DELETE CASCADE
+            )
+        `);
     } finally {
         connection.release();
     }
@@ -564,6 +574,31 @@ async function getUserPosition(guildId, userId, type) {
     return rows[0].position + 1;
 }
 
+async function getUserDaily(guildId, userId) {
+    const [rows] = await pool.execute(
+        'SELECT * FROM user_daily WHERE guild_id = ? AND user_id = ?',
+        [guildId, userId]
+    );
+
+    if (rows.length === 0) {
+        await pool.execute(
+            'INSERT INTO user_daily (guild_id, user_id, last_daily) VALUES (?, ?, 0)',
+            [guildId, userId]
+        );
+        return { last_daily: 0 };
+    }
+
+    return rows[0];
+}
+
+async function updateUserDaily(guildId, userId) {
+    const now = Math.floor(Date.now() / 1000);
+    await pool.execute(
+        'INSERT INTO user_daily (guild_id, user_id, last_daily) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE last_daily = ?',
+        [guildId, userId, now, now]
+    );
+}
+
 module.exports = {
     connectDatabase,
     getGuildPrefix,
@@ -579,5 +614,7 @@ module.exports = {
     removeMoney,
     getLeaderboard,
     addMoney,
-    getUserPosition
+    getUserPosition,
+    getUserDaily,
+    updateUserDaily
 };
