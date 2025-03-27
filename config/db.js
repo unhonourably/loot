@@ -9,15 +9,15 @@ async function connectDatabase() {
     }
 
     pool = mysql.createPool({
-        host: config.database.host,
+    host: config.database.host,
         port: config.database.port,
-        user: config.database.user,
-        password: config.database.password,
-        database: config.database.database,
-        waitForConnections: true,
+    user: config.database.user,
+    password: config.database.password,
+    database: config.database.database,
+    waitForConnections: true,
         connectionLimit: 10,
-        queueLimit: 0
-    });
+    queueLimit: 0
+});
 
     await createTables();
     return pool;
@@ -94,7 +94,6 @@ async function setGuildPrefix(guildId, prefix) {
 }
 
 async function getGuildConfig(guildId) {
-    // First ensure the guild prefix exists
     await setGuildPrefix(guildId, '!');
     
     const [rows] = await pool.query('SELECT * FROM guild_configs WHERE guild_id = ?', [guildId]);
@@ -109,7 +108,6 @@ async function getGuildConfig(guildId) {
 }
 
 async function updateGuildConfig(guildId, updates) {
-    // First ensure the guild prefix exists
     await setGuildPrefix(guildId, '!');
 
     const validFields = [
@@ -212,6 +210,360 @@ async function transferMoney(guildId, userId, amount, toBank = true) {
     }
 }
 
+async function resetUserBalance(guildId, userId, type) {
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        const [rows] = await connection.query(
+            'SELECT * FROM user_balances WHERE guild_id = ? AND user_id = ? FOR UPDATE',
+            [guildId, userId]
+        );
+
+        if (rows.length === 0) {
+            throw new Error('User not found');
+        }
+
+        switch (type) {
+            case 'wallet':
+                await connection.query(
+                    'UPDATE user_balances SET wallet_balance = 0 WHERE guild_id = ? AND user_id = ?',
+                    [guildId, userId]
+                );
+                break;
+            case 'bank':
+                await connection.query(
+                    'UPDATE user_balances SET bank_balance = 0 WHERE guild_id = ? AND user_id = ?',
+                    [guildId, userId]
+                );
+                break;
+            case 'all':
+                await connection.query(
+                    'UPDATE user_balances SET wallet_balance = 0, bank_balance = 0 WHERE guild_id = ? AND user_id = ?',
+                    [guildId, userId]
+                );
+                break;
+            default:
+                throw new Error('Invalid reset type');
+        }
+
+        await connection.commit();
+        return true;
+    } catch (error) {
+        await connection.rollback();
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function giveMoney(guildId, userId, amount, type) {
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        const [rows] = await connection.query(
+            'SELECT * FROM user_balances WHERE guild_id = ? AND user_id = ? FOR UPDATE',
+            [guildId, userId]
+        );
+
+        if (rows.length === 0) {
+            const config = await getGuildConfig(guildId);
+            await connection.query(
+                'INSERT INTO user_balances (guild_id, user_id, wallet_balance, bank_balance) VALUES (?, ?, ?, ?)',
+                [guildId, userId, type === 'wallet' ? amount : 0, type === 'bank' ? amount : 0]
+            );
+        } else {
+            const config = await getGuildConfig(guildId);
+            const newBalance = rows[0][`${type}_balance`] + amount;
+            
+            if (newBalance > config.max_balance) {
+                throw new Error('Amount would exceed maximum balance limit');
+            }
+
+            await connection.query(
+                `UPDATE user_balances SET ${type}_balance = ${type}_balance + ? WHERE guild_id = ? AND user_id = ?`,
+                [amount, guildId, userId]
+            );
+        }
+
+        await connection.commit();
+        return true;
+    } catch (error) {
+        await connection.rollback();
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function addMoneyToRole(guildId, roleId, amount, type) {
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        const config = await getGuildConfig(guildId);
+        const maxBalance = config.max_balance;
+
+        const [rows] = await connection.query(
+            'SELECT user_id FROM user_balances WHERE guild_id = ?',
+            [guildId]
+        );
+
+        let successCount = 0;
+        let failCount = 0;
+
+        for (const row of rows) {
+            try {
+                const currentBalance = row[`${type}_balance`];
+                const newBalance = currentBalance + amount;
+
+                if (newBalance > maxBalance) {
+                    failCount++;
+                    continue;
+                }
+
+                await connection.query(
+                    `UPDATE user_balances SET ${type}_balance = ${type}_balance + ? WHERE guild_id = ? AND user_id = ?`,
+                    [amount, guildId, row.user_id]
+                );
+                successCount++;
+            } catch (error) {
+                failCount++;
+            }
+        }
+
+        await connection.commit();
+        return { successCount, failCount };
+    } catch (error) {
+        await connection.rollback();
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function removeMoneyFromRole(guildId, roleId, amount, type) {
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        const [rows] = await connection.query(
+            'SELECT user_id FROM user_balances WHERE guild_id = ?',
+            [guildId]
+        );
+
+        let successCount = 0;
+        let failCount = 0;
+
+        for (const row of rows) {
+            try {
+                if (type === 'all') {
+                    const totalBalance = row.wallet_balance + row.bank_balance;
+                    if (totalBalance < amount) {
+                        failCount++;
+                        continue;
+                    }
+
+             
+                    if (row.bank_balance >= amount) {
+                        await connection.query(
+                            'UPDATE user_balances SET bank_balance = bank_balance - ? WHERE guild_id = ? AND user_id = ?',
+                            [amount, guildId, row.user_id]
+                        );
+                    } else {
+                        const remainingAmount = amount - row.bank_balance;
+                        await connection.query(
+                            'UPDATE user_balances SET bank_balance = 0, wallet_balance = wallet_balance - ? WHERE guild_id = ? AND user_id = ?',
+                            [remainingAmount, guildId, row.user_id]
+                        );
+                    }
+                } else {
+                    const currentBalance = row[`${type}_balance`];
+                    if (currentBalance < amount) {
+                        failCount++;
+                        continue;
+                    }
+
+                    await connection.query(
+                        `UPDATE user_balances SET ${type}_balance = ${type}_balance - ? WHERE guild_id = ? AND user_id = ?`,
+                        [amount, guildId, row.user_id]
+                    );
+                }
+                successCount++;
+            } catch (error) {
+                failCount++;
+            }
+        }
+
+        await connection.commit();
+        return { successCount, failCount };
+    } catch (error) {
+        await connection.rollback();
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function removeMoney(guildId, userId, amount, type) {
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        const [rows] = await connection.query(
+            'SELECT * FROM user_balances WHERE guild_id = ? AND user_id = ? FOR UPDATE',
+            [guildId, userId]
+        );
+
+        if (rows.length === 0) {
+            throw new Error('User not found');
+        }
+
+        if (type === 'all') {
+            const totalBalance = rows[0].wallet_balance + rows[0].bank_balance;
+            if (totalBalance < amount) {
+                throw new Error('Insufficient total balance');
+            }
+
+       
+            if (rows[0].bank_balance >= amount) {
+                await connection.query(
+                    'UPDATE user_balances SET bank_balance = bank_balance - ? WHERE guild_id = ? AND user_id = ?',
+                    [amount, guildId, userId]
+                );
+            } else {
+                const remainingAmount = amount - rows[0].bank_balance;
+                await connection.query(
+                    'UPDATE user_balances SET bank_balance = 0, wallet_balance = wallet_balance - ? WHERE guild_id = ? AND user_id = ?',
+                    [remainingAmount, guildId, userId]
+                );
+            }
+        } else {
+            const currentBalance = rows[0][`${type}_balance`];
+            if (currentBalance < amount) {
+                throw new Error(`Insufficient ${type} balance`);
+            }
+
+            await connection.query(
+                `UPDATE user_balances SET ${type}_balance = ${type}_balance - ? WHERE guild_id = ? AND user_id = ?`,
+                [amount, guildId, userId]
+            );
+        }
+
+        await connection.commit();
+        return true;
+    } catch (error) {
+        await connection.rollback();
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function getLeaderboard(guildId, type, page = 1) {
+    const perPage = 10;
+    const offset = (page - 1) * perPage;
+
+    let query;
+    let params = [guildId];
+
+    switch (type) {
+        case 'wallet':
+            query = `
+                SELECT user_id, wallet_balance as balance 
+                FROM user_balances 
+                WHERE guild_id = ? 
+                ORDER BY wallet_balance DESC 
+                LIMIT ? OFFSET ?
+            `;
+            params.push(perPage, offset);
+            break;
+        case 'bank':
+            query = `
+                SELECT user_id, bank_balance as balance 
+                FROM user_balances 
+                WHERE guild_id = ? 
+                ORDER BY bank_balance DESC 
+                LIMIT ? OFFSET ?
+            `;
+            params.push(perPage, offset);
+            break;
+        case 'total':
+        default:
+            query = `
+                SELECT user_id, (wallet_balance + bank_balance) as balance 
+                FROM user_balances 
+                WHERE guild_id = ? 
+                ORDER BY (wallet_balance + bank_balance) DESC 
+                LIMIT ? OFFSET ?
+            `;
+            params.push(perPage, offset);
+            break;
+    }
+
+    const [rows] = await pool.query(query, params);
+    const [countResult] = await pool.query('SELECT COUNT(*) as total FROM user_balances WHERE guild_id = ?', [guildId]);
+    
+    return {
+        users: rows,
+        total: countResult[0].total,
+        pages: Math.ceil(countResult[0].total / perPage),
+        currentPage: page
+    };
+}
+
+async function addMoney(guildId, userId, amount, type) {
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        const [rows] = await connection.execute(
+            'SELECT * FROM user_balances WHERE guild_id = ? AND user_id = ?',
+            [guildId, userId]
+        );
+
+        if (rows.length === 0) {
+            const guildConfig = await getGuildConfig(guildId);
+            await connection.execute(
+                'INSERT INTO user_balances (guild_id, user_id, wallet_balance, bank_balance) VALUES (?, ?, ?, ?)',
+                [guildId, userId, guildConfig.starting_balance, 0]
+            );
+        }
+
+        const column = type === 'wallet' ? 'wallet_balance' : 'bank_balance';
+        await connection.execute(
+            `UPDATE user_balances SET ${column} = ${column} + ? WHERE guild_id = ? AND user_id = ?`,
+            [amount, guildId, userId]
+        );
+
+        await connection.commit();
+    } catch (error) {
+        await connection.rollback();
+        throw error;
+    } finally {
+        connection.release();
+    }
+}
+
+async function getUserPosition(guildId, userId, type) {
+    let query;
+    switch (type) {
+        case 'wallet':
+            query = 'SELECT COUNT(*) as position FROM user_balances WHERE guild_id = ? AND wallet_balance > (SELECT wallet_balance FROM user_balances WHERE guild_id = ? AND user_id = ?)';
+            break;
+        case 'bank':
+            query = 'SELECT COUNT(*) as position FROM user_balances WHERE guild_id = ? AND bank_balance > (SELECT bank_balance FROM user_balances WHERE guild_id = ? AND user_id = ?)';
+            break;
+        case 'total':
+        default:
+            query = 'SELECT COUNT(*) as position FROM user_balances WHERE guild_id = ? AND (wallet_balance + bank_balance) > (SELECT (wallet_balance + bank_balance) FROM user_balances WHERE guild_id = ? AND user_id = ?)';
+    }
+
+    const [rows] = await pool.execute(query, [guildId, guildId, userId]);
+    return rows[0].position + 1;
+}
+
 module.exports = {
     connectDatabase,
     getGuildPrefix,
@@ -219,5 +571,13 @@ module.exports = {
     getGuildConfig,
     updateGuildConfig,
     getUserBalance,
-    transferMoney
+    transferMoney,
+    resetUserBalance,
+    giveMoney,
+    addMoneyToRole,
+    removeMoneyFromRole,
+    removeMoney,
+    getLeaderboard,
+    addMoney,
+    getUserPosition
 };

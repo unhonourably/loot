@@ -88,7 +88,6 @@ module.exports = {
                 const setting = messageOrInteraction.options.getString('setting');
                 let value = messageOrInteraction.options.getString('value');
 
-                // Convert value based on setting type
                 if (['shop_enabled', 'gambling_enabled', 'rob_enabled', 'work_enabled', 'daily_enabled', 'interest_enabled'].includes(setting)) {
                     value = value.toLowerCase() === 'true';
                 } else if (['command_cooldown', 'daily_cooldown', 'work_cooldown', 'interest_cooldown', 'rob_cooldown'].includes(setting)) {
@@ -153,7 +152,6 @@ module.exports = {
                 const setting = args[1].toLowerCase();
                 let value = args[2];
 
-                // Convert value based on setting type
                 if (['shop_enabled', 'gambling_enabled', 'rob_enabled', 'work_enabled', 'daily_enabled', 'interest_enabled'].includes(setting)) {
                     value = value.toLowerCase() === 'true';
                 } else if (['command_cooldown', 'daily_cooldown', 'work_cooldown', 'interest_cooldown', 'rob_cooldown'].includes(setting)) {
